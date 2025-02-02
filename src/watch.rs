@@ -24,6 +24,7 @@ pub struct DataWatcher {
     input: PathBuf,
     output: Option<PathBuf>,
     deaths: HashMap<PathBuf, u32>,
+    previous: Option<u32>,
     interval: u64,
 }
 
@@ -35,6 +36,7 @@ impl DataWatcher {
             input,
             output,
             deaths: HashMap::new(),
+            previous: None,
         }
     }
 
@@ -45,13 +47,13 @@ impl DataWatcher {
 
     fn compute_deaths_paths(&mut self, paths: Vec<PathBuf>) -> u32 {
         paths
-            .iter()
+            .into_iter()
             .filter(|path| path.extension().map_or(false, |ext| ext == "json"))
             .filter_map(|path| {
-                File::open(path).ok().and_then(|file| {
+                File::open(&path).ok().and_then(|file| {
                     Self::compute_deaths_file(file)
                         .ok()
-                        .map(|deaths| (path.clone(), deaths))
+                        .map(|deaths| (path, deaths))
                 })
             })
             .for_each(|(path, deaths)| {
@@ -77,40 +79,37 @@ impl DataWatcher {
         Ok(())
     }
 
-    fn update_deaths(&self, deaths: u32) -> anyhow::Result<()> {
+    fn update_deaths(&mut self, deaths: u32) -> anyhow::Result<()> {
         match &self.output {
             Some(output) => self.write_deaths(deaths, output)?,
             None => println!("{}", deaths),
         };
 
+        self.previous = Some(deaths);
         Ok(())
     }
 
     fn receive(&mut self, rx: &Receiver<Result<Event, Error>>) {
-        let receiver = match rx.recv() {
-            Result::Ok(event) => event,
-            Err(e) => {
-                eprintln!("watch error: {:?}", e);
-                return;
-            }
-        };
+        match rx.recv() {
+            Ok(Ok(event)) => {
+                println!("{:?}", event);
 
-        let event = match receiver {
-            Result::Ok(event) => event,
-            Err(e) => {
-                eprintln!("watch error: {:?}", e);
-                return;
-            }
-        };
+                if matches!(
+                    event.kind,
+                    EventKind::Create(CreateKind::File)
+                        | EventKind::Modify(ModifyKind::Data(DataChange::Content))
+                        | EventKind::Remove(RemoveKind::File)
+                ) {
+                    let deaths = self.compute_deaths_paths(event.paths);
 
-        match event.kind {
-            EventKind::Create(CreateKind::File)
-            | EventKind::Modify(ModifyKind::Data(DataChange::Content))
-            | EventKind::Remove(RemoveKind::File) => {
-                let deaths = self.compute_deaths_paths(event.paths);
-                self.update_deaths(deaths).unwrap();
+                    match self.update_deaths(deaths) {
+                        Ok(_) => (),
+                        Err(e) => eprintln!("Failed to update deaths: {:?}", e),
+                    }
+                }
             }
-            _ => {}
+            Ok(Err(e)) => eprintln!("Event error: {:?}", e),
+            Err(e) => eprintln!("Receiver error: {:?}", e),
         }
     }
 

@@ -1,8 +1,6 @@
-use std::path::PathBuf;
-
-use anyhow::Ok;
 use clap::Parser;
 use gd_death_counter::watch::DataWatcher;
+use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
 struct Args {
@@ -18,10 +16,5 @@ struct Args {
 
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
-
-    let mut watcher = DataWatcher::new(args.baseline, args.interval, args.path, args.output);
-
-    watcher.watch()?;
-
-    Ok(())
+    DataWatcher::new(args.baseline, args.interval, args.path, args.output).watch()
 }
