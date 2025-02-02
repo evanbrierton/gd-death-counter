@@ -12,12 +12,3 @@ impl Level {
         self.deaths.values().sum::<u32>() + self.runs.values().sum::<u32>()
     }
 }
-
-impl Default for Level {
-    fn default() -> Self {
-        Self {
-            deaths: HashMap::new(),
-            runs: HashMap::new(),
-        }
-    }
-}

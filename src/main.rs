@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use anyhow::Ok;
 use clap::Parser;
-use death_counter_rs::watch::{self, DataWatcher};
+use gd_death_counter::watch::DataWatcher;
 
 #[derive(Parser, Debug)]
 struct Args {
