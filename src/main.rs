@@ -11,12 +11,15 @@ struct Args {
 
     #[arg(short, long, value_enum, default_value = "0")]
     baseline: u32,
+
+    #[arg(short, long, default_value = "30000")]
+    interval: u64,
 }
 
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
-    let mut watcher = DataWatcher::new(args.baseline, args.path, args.output);
+    let mut watcher = DataWatcher::new(args.baseline, args.interval, args.path, args.output);
 
     watcher.watch()?;
 

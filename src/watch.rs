@@ -8,11 +8,13 @@ use std::{
         Arc, Mutex,
     },
     thread,
+    time::Duration,
 };
 
 use notify::{
     event::{CreateKind, DataChange, ModifyKind, RemoveKind},
-    recommended_watcher, Error, Event, EventKind, RecursiveMode, Watcher,
+    recommended_watcher, Config, Error, Event, EventKind, RecommendedWatcher, RecursiveMode,
+    Watcher,
 };
 
 use crate::level::Level;
@@ -23,12 +25,14 @@ pub struct DataWatcher {
     input: PathBuf,
     output: Option<PathBuf>,
     deaths: HashMap<PathBuf, u32>,
+    interval: u64,
 }
 
 impl DataWatcher {
-    pub fn new(baseline: u32, input: PathBuf, output: Option<PathBuf>) -> Self {
+    pub fn new(baseline: u32, interval: u64, input: PathBuf, output: Option<PathBuf>) -> Self {
         Self {
             baseline,
+            interval,
             input,
             output,
             deaths: HashMap::new(),
@@ -41,14 +45,6 @@ impl DataWatcher {
     }
 
     fn compute_deaths_paths(&mut self, paths: Vec<PathBuf>) -> u32 {
-        println!(
-            "{:?}",
-            paths
-                .iter()
-                .filter(|path| path.extension().map_or(false, |ext| ext == "json"))
-                .collect::<Vec<_>>()
-        );
-
         paths
             .iter()
             .filter(|path| path.extension().map_or(false, |ext| ext == "json"))
@@ -124,7 +120,10 @@ impl DataWatcher {
         self.update_deaths(deaths)?;
 
         let (tx, rx) = channel();
-        let mut watcher = recommended_watcher(tx)?;
+        let mut watcher = RecommendedWatcher::new(
+            tx,
+            Config::default().with_poll_interval(Duration::from_millis(self.interval)),
+        )?;
 
         watcher.watch(&self.input, RecursiveMode::NonRecursive)?;
 
