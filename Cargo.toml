@@ -2,6 +2,9 @@
 name = "gd-death-counter"
 version = "0.1.0"
 edition = "2021"
+description = "A death counter for Geometry Dash."
+license = "MIT"
+authors = ["Evan Brierton"]
 
 [dependencies]
 serde = { version = "1.0.217", features = ["derive"] }
