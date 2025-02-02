@@ -13,8 +13,7 @@ use std::{
 
 use notify::{
     event::{CreateKind, DataChange, ModifyKind, RemoveKind},
-    recommended_watcher, Config, Error, Event, EventKind, RecommendedWatcher, RecursiveMode,
-    Watcher,
+    Config, Error, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher,
 };
 
 use crate::level::Level;
