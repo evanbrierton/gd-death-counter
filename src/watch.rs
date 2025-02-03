@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     fs::{self, File, ReadDir},
     io::Write,
-    path::{Path, PathBuf},
+    path::{self, Path, PathBuf},
     sync::{
         mpsc::{channel, Receiver},
         Arc, Mutex,
@@ -12,7 +12,7 @@ use std::{
 };
 
 use notify::{
-    event::{CreateKind, DataChange, ModifyKind, RemoveKind},
+    event::{ModifyKind, RenameMode},
     Config, Error, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher,
 };
 
@@ -40,12 +40,24 @@ impl DataWatcher {
         }
     }
 
+    fn get_total_deaths(&self) -> u32 {
+        self.deaths.values().sum::<u32>() + self.baseline
+    }
+
     fn compute_deaths_file(file: File) -> anyhow::Result<u32> {
         let level: Level = serde_json::from_reader(file)?;
         Ok(level.total_deaths())
     }
 
-    fn compute_deaths_paths(&mut self, paths: Vec<PathBuf>) -> u32 {
+    fn compute_deaths_paths(&mut self, paths: Vec<PathBuf>) {
+        println!(
+            "{:?}",
+            paths
+                .iter()
+                .filter(|path| path.extension().map_or(false, |ext| ext == "json"))
+                .collect::<Vec<_>>()
+        );
+
         paths
             .into_iter()
             .filter(|path| path.extension().map_or(false, |ext| ext == "json"))
@@ -59,15 +71,13 @@ impl DataWatcher {
             .for_each(|(path, deaths)| {
                 self.deaths.insert(path, deaths);
             });
-
-        self.deaths.values().sum::<u32>() + self.baseline
     }
 
-    fn compute_deaths_dir(&mut self, directory: ReadDir) -> u32 {
+    fn compute_deaths_dir(&mut self, directory: ReadDir) {
         self.compute_deaths_paths(
             directory
-                .filter_map(Result::ok)
-                .map(|entry| entry.path().canonicalize())
+                .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+                .map(path::absolute)
                 .filter_map(Result::ok)
                 .collect(),
         )
@@ -80,6 +90,12 @@ impl DataWatcher {
     }
 
     fn update_deaths(&mut self, deaths: u32) -> anyhow::Result<()> {
+        if let Some(previous) = self.previous {
+            if deaths == previous {
+                return Ok(());
+            }
+        }
+
         match &self.output {
             Some(output) => self.write_deaths(deaths, output)?,
             None => println!("{}", deaths),
@@ -94,15 +110,26 @@ impl DataWatcher {
             Ok(Ok(event)) => {
                 println!("{:?}", event);
 
+                println!("{:?}", self.deaths);
+
+                match event.kind {
+                    EventKind::Modify(ModifyKind::Name(RenameMode::From))
+                    | EventKind::Remove(_) => event.paths.iter().for_each(|path| {
+                        self.deaths.remove(path);
+                    }),
+                    EventKind::Create(_) | EventKind::Modify(_) => {
+                        self.compute_deaths_paths(event.paths)
+                    }
+                    _ => {}
+                }
+
+                println!("{:?}", self.deaths);
+
                 if matches!(
                     event.kind,
-                    EventKind::Create(CreateKind::File)
-                        | EventKind::Modify(ModifyKind::Data(DataChange::Content))
-                        | EventKind::Remove(RemoveKind::File)
+                    EventKind::Remove(_) | EventKind::Create(_) | EventKind::Modify(_)
                 ) {
-                    let deaths = self.compute_deaths_paths(event.paths);
-
-                    match self.update_deaths(deaths) {
+                    match self.update_deaths(self.get_total_deaths()) {
                         Ok(_) => (),
                         Err(e) => eprintln!("Failed to update deaths: {:?}", e),
                     }
@@ -114,8 +141,8 @@ impl DataWatcher {
     }
 
     pub fn watch(&mut self) -> anyhow::Result<()> {
-        let deaths = self.compute_deaths_dir(fs::read_dir(&self.input)?);
-        self.update_deaths(deaths)?;
+        self.compute_deaths_dir(fs::read_dir(&self.input)?);
+        self.update_deaths(self.get_total_deaths())?;
 
         let (tx, rx) = channel();
         let mut watcher = RecommendedWatcher::new(
