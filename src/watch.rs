@@ -3,17 +3,11 @@ use std::{
     fs::{self, File, ReadDir},
     io::Write,
     path::{self, Path, PathBuf},
-    sync::{
-        mpsc::{channel, Receiver},
-        Arc, Mutex,
-    },
-    thread,
-    time::Duration,
 };
 
 use notify::{
     event::{ModifyKind, RenameMode},
-    Config, Error, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher,
+    recommended_watcher, Event, EventKind, RecursiveMode, Watcher,
 };
 
 use crate::level::Level;
@@ -25,14 +19,12 @@ pub struct DataWatcher {
     output: Option<PathBuf>,
     deaths: HashMap<PathBuf, u32>,
     previous: Option<u32>,
-    interval: u64,
 }
 
 impl DataWatcher {
-    pub fn new(baseline: u32, interval: u64, input: PathBuf, output: Option<PathBuf>) -> Self {
+    pub fn new(baseline: u32, input: PathBuf, output: Option<PathBuf>) -> Self {
         Self {
             baseline,
-            interval,
             input,
             output,
             deaths: HashMap::new(),
@@ -97,12 +89,19 @@ impl DataWatcher {
         Ok(())
     }
 
-    fn receive(&mut self, rx: &Receiver<Result<Event, Error>>) {
-        match rx.recv() {
-            Ok(Ok(event)) => {
+    fn receive(&mut self, rx: notify::Result<Event>) {
+        match rx {
+            Ok(event) => {
                 match event.kind {
-                    EventKind::Modify(ModifyKind::Name(RenameMode::From))
-                    | EventKind::Remove(_) => event.paths.iter().for_each(|path| {
+                    EventKind::Modify(ModifyKind::Name(RenameMode::Any)) => {
+                        self.deaths.clear();
+
+                        match fs::read_dir(&self.input) {
+                            Ok(dir) => self.compute_deaths_dir(dir),
+                            Err(e) => eprintln!("Failed to read directory: {:?}", e),
+                        }
+                    }
+                    EventKind::Remove(_) => event.paths.iter().for_each(|path| {
                         self.deaths.remove(path);
                     }),
                     EventKind::Create(_) | EventKind::Modify(_) => {
@@ -121,34 +120,24 @@ impl DataWatcher {
                     }
                 }
             }
-            Ok(Err(e)) => eprintln!("Event error: {:?}", e),
-            Err(e) => eprintln!("Receiver error: {:?}", e),
+            Err(e) => eprintln!("Failed to receive event: {:?}", e),
         }
     }
 
-    pub fn watch(&mut self) -> anyhow::Result<()> {
+    pub fn watch(mut self) -> anyhow::Result<()> {
         self.compute_deaths_dir(fs::read_dir(&self.input)?);
         self.update_deaths(self.get_total_deaths())?;
 
-        let (tx, rx) = channel();
-        let mut watcher = RecommendedWatcher::new(
-            tx,
-            Config::default().with_poll_interval(Duration::from_millis(self.interval)),
-        )?;
+        let input = self.input.clone();
 
-        watcher.watch(&self.input, RecursiveMode::NonRecursive)?;
+        let handler = move |event: notify::Result<Event>| {
+            self.receive(event);
+        };
 
-        let rx_arc = Arc::new(Mutex::new(rx));
-        let self_arc = Arc::new(Mutex::new(self.clone()));
+        let mut watcher = recommended_watcher(handler)?;
 
-        thread::spawn(move || loop {
-            let rx_lock = rx_arc.lock().unwrap();
-            let mut self_lock = self_arc.lock().unwrap();
-            self_lock.receive(&rx_lock);
-        });
+        watcher.watch(&input, RecursiveMode::NonRecursive)?;
 
-        loop {
-            std::thread::park();
-        }
+        Ok(())
     }
 }
