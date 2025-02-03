@@ -50,14 +50,6 @@ impl DataWatcher {
     }
 
     fn compute_deaths_paths(&mut self, paths: Vec<PathBuf>) {
-        println!(
-            "{:?}",
-            paths
-                .iter()
-                .filter(|path| path.extension().map_or(false, |ext| ext == "json"))
-                .collect::<Vec<_>>()
-        );
-
         paths
             .into_iter()
             .filter(|path| path.extension().map_or(false, |ext| ext == "json"))
@@ -108,10 +100,6 @@ impl DataWatcher {
     fn receive(&mut self, rx: &Receiver<Result<Event, Error>>) {
         match rx.recv() {
             Ok(Ok(event)) => {
-                println!("{:?}", event);
-
-                println!("{:?}", self.deaths);
-
                 match event.kind {
                     EventKind::Modify(ModifyKind::Name(RenameMode::From))
                     | EventKind::Remove(_) => event.paths.iter().for_each(|path| {
@@ -122,8 +110,6 @@ impl DataWatcher {
                     }
                     _ => {}
                 }
-
-                println!("{:?}", self.deaths);
 
                 if matches!(
                     event.kind,
