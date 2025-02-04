@@ -3,11 +3,15 @@ use std::{
     fs::{self, File, ReadDir},
     io::Write,
     path::{self, Path, PathBuf},
+    sync::{
+        mpsc::{channel, Receiver},
+        Arc, Mutex,
+    },
 };
 
 use notify::{
     event::{ModifyKind, RenameMode},
-    recommended_watcher, Event, EventKind, RecursiveMode, Watcher,
+    recommended_watcher, Error, Event, EventKind, RecursiveMode, Watcher,
 };
 
 use crate::level::Level;
@@ -89,55 +93,67 @@ impl DataWatcher {
         Ok(())
     }
 
-    fn receive(&mut self, rx: notify::Result<Event>) {
-        match rx {
-            Ok(event) => {
-                match event.kind {
-                    EventKind::Modify(ModifyKind::Name(RenameMode::Any)) => {
-                        self.deaths.clear();
+    fn receive(&mut self, rx: &Receiver<Result<Event, Error>>) {
+        let receiver = match rx.recv() {
+            Ok(event) => event,
+            Err(e) => {
+                eprintln!("Failed to receive event: {:?}", e);
+                return;
+            }
+        };
 
-                        match fs::read_dir(&self.input) {
-                            Ok(dir) => self.compute_deaths_dir(dir),
-                            Err(e) => eprintln!("Failed to read directory: {:?}", e),
-                        }
-                    }
-                    EventKind::Remove(_) => event.paths.iter().for_each(|path| {
-                        self.deaths.remove(path);
-                    }),
-                    EventKind::Create(_) | EventKind::Modify(_) => {
-                        self.compute_deaths_paths(event.paths)
-                    }
-                    _ => {}
-                }
+        let event = match receiver {
+            Ok(event) => event,
+            Err(e) => {
+                eprintln!("Failed to receive event: {:?}", e);
+                return;
+            }
+        };
 
-                if matches!(
-                    event.kind,
-                    EventKind::Remove(_) | EventKind::Create(_) | EventKind::Modify(_)
-                ) {
-                    match self.update_deaths(self.get_total_deaths()) {
-                        Ok(_) => (),
-                        Err(e) => eprintln!("Failed to update deaths: {:?}", e),
-                    }
+        match event.kind {
+            EventKind::Modify(ModifyKind::Name(RenameMode::Any)) => {
+                self.deaths.clear();
+
+                match fs::read_dir(&self.input) {
+                    Ok(dir) => self.compute_deaths_dir(dir),
+                    Err(e) => eprintln!("Failed to read directory: {:?}", e),
                 }
             }
-            Err(e) => eprintln!("Failed to receive event: {:?}", e),
+            EventKind::Remove(_) => event.paths.iter().for_each(|path| {
+                self.deaths.remove(path);
+            }),
+            EventKind::Create(_) | EventKind::Modify(_) => self.compute_deaths_paths(event.paths),
+            _ => {}
+        }
+
+        if matches!(
+            event.kind,
+            EventKind::Remove(_) | EventKind::Create(_) | EventKind::Modify(_)
+        ) {
+            match self.update_deaths(self.get_total_deaths()) {
+                Ok(_) => (),
+                Err(e) => eprintln!("Failed to update deaths: {:?}", e),
+            }
         }
     }
 
-    pub fn watch(mut self) -> anyhow::Result<()> {
+    pub fn watch(&mut self) -> anyhow::Result<()> {
         self.compute_deaths_dir(fs::read_dir(&self.input)?);
         self.update_deaths(self.get_total_deaths())?;
 
+        let (tx, rx) = channel();
+
         let input = self.input.clone();
 
-        let handler = move |event: notify::Result<Event>| {
-            self.receive(event);
-        };
-
-        let mut watcher = recommended_watcher(handler)?;
+        let mut watcher = recommended_watcher(tx)?;
 
         watcher.watch(&input, RecursiveMode::NonRecursive)?;
 
-        Ok(())
+        let rx_arc = Arc::new(Mutex::new(rx));
+
+        loop {
+            let rx_lock = rx_arc.lock().unwrap();
+            self.receive(&rx_lock);
+        }
     }
 }
