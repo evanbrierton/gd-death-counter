@@ -1,91 +1,56 @@
 use std::{
     collections::HashMap,
-    fs::{self, File, ReadDir},
+    fs::{self, File},
     io::Write,
-    path::{self, Path, PathBuf},
-    sync::{
-        mpsc::{channel, Receiver},
-        Arc, Mutex,
-    },
+    path::{self, PathBuf},
+    result::Result::Ok,
+    sync::mpsc::channel,
+    time::Instant,
 };
 
 use notify::{
     event::{ModifyKind, RenameMode},
-    recommended_watcher, Error, Event, EventKind, RecursiveMode, Watcher,
+    recommended_watcher, Event, EventKind, RecursiveMode, Watcher,
 };
 
 use crate::level::Level;
 
-#[derive(Clone)]
 pub struct DataWatcher {
     baseline: u32,
     input: PathBuf,
-    output: Option<PathBuf>,
+    output: Option<File>,
     deaths: HashMap<PathBuf, u32>,
+    open_files: HashMap<PathBuf, std::io::Result<File>>,
     previous: Option<u32>,
 }
 
 impl DataWatcher {
-    pub fn new(baseline: u32, input: PathBuf, output: Option<PathBuf>) -> Self {
+    pub fn new(baseline: u32, input: PathBuf, output_path: Option<PathBuf>) -> Self {
         Self {
             baseline,
             input,
-            output,
+            output: match output_path {
+                Some(o) => match File::create(o) {
+                    Ok(file) => Some(file),
+                    Err(_) => None,
+                },
+                None => None,
+            },
             deaths: HashMap::new(),
+            open_files: HashMap::new(),
             previous: None,
         }
     }
 
-    fn get_total_deaths(&self) -> u32 {
-        self.deaths.values().sum::<u32>() + self.baseline
-    }
-
-    fn compute_deaths_file(file: File) -> anyhow::Result<u32> {
-        let level: Level = serde_json::from_reader(file)?;
-        Ok(level.total_deaths())
-    }
-
-    fn compute_deaths_paths(&mut self, paths: Vec<PathBuf>) {
-        paths
-            .into_iter()
-            .filter(|path| path.extension().map_or(false, |ext| ext == "json"))
-            .filter_map(|path| {
-                File::open(&path).ok().and_then(|file| {
-                    Self::compute_deaths_file(file)
-                        .ok()
-                        .map(|deaths| (path, deaths))
-                })
-            })
-            .for_each(|(path, deaths)| {
-                self.deaths.insert(path, deaths);
-            });
-    }
-
-    fn compute_deaths_dir(&mut self, directory: ReadDir) {
-        self.compute_deaths_paths(
-            directory
-                .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-                .map(path::absolute)
-                .filter_map(Result::ok)
-                .collect(),
-        )
-    }
-
-    fn write_deaths<P: AsRef<Path>>(&self, deaths: u32, output: P) -> anyhow::Result<()> {
-        let mut file = File::create(output)?;
-        write!(file, "{}", deaths)?;
-        Ok(())
-    }
-
-    fn update_deaths(&mut self, deaths: u32) -> anyhow::Result<()> {
+    fn write_deaths(&mut self, deaths: u32) -> anyhow::Result<()> {
         if let Some(previous) = self.previous {
             if deaths == previous {
                 return Ok(());
             }
         }
 
-        match &self.output {
-            Some(output) => self.write_deaths(deaths, output)?,
+        match self.output {
+            Some(ref mut output) => write!(output, "{}", deaths)?,
             None => println!("{}", deaths),
         };
 
@@ -93,67 +58,82 @@ impl DataWatcher {
         Ok(())
     }
 
-    fn receive(&mut self, rx: &Receiver<Result<Event, Error>>) {
-        let receiver = match rx.recv() {
-            Ok(event) => event,
-            Err(e) => {
-                eprintln!("Failed to receive event: {:?}", e);
-                return;
-            }
-        };
-
-        let event = match receiver {
-            Ok(event) => event,
-            Err(e) => {
-                eprintln!("Failed to receive event: {:?}", e);
-                return;
-            }
-        };
-
-        match event.kind {
-            EventKind::Modify(ModifyKind::Name(RenameMode::Any)) => {
-                self.deaths.clear();
-
-                match fs::read_dir(&self.input) {
-                    Ok(dir) => self.compute_deaths_dir(dir),
-                    Err(e) => eprintln!("Failed to read directory: {:?}", e),
-                }
-            }
-            EventKind::Remove(_) => event.paths.iter().for_each(|path| {
-                self.deaths.remove(path);
-            }),
-            EventKind::Create(_) | EventKind::Modify(_) => self.compute_deaths_paths(event.paths),
-            _ => {}
-        }
-
-        if matches!(
-            event.kind,
-            EventKind::Remove(_) | EventKind::Create(_) | EventKind::Modify(_)
-        ) {
-            match self.update_deaths(self.get_total_deaths()) {
-                Ok(_) => (),
-                Err(e) => eprintln!("Failed to update deaths: {:?}", e),
-            }
+    fn remove_files(&mut self, paths: &Vec<PathBuf>) {
+        for path in paths {
+            self.deaths.remove(path);
+            self.open_files.remove(path);
         }
     }
 
+    fn get_total_deaths(&self) -> u32 {
+        self.deaths.values().sum::<u32>() + self.baseline
+    }
+
+    fn compute_deaths_file(file: &File) -> anyhow::Result<u32> {
+        let level: Level = serde_json::from_reader(file)?;
+        Ok(level.total_deaths())
+    }
+
+    fn compute_deaths(&mut self, paths: &Vec<PathBuf>) -> anyhow::Result<()> {
+        for path in paths {
+            if path.extension().map_or(false, |ext| ext == "json") {
+                let file = self
+                    .open_files
+                    .entry(path.clone())
+                    .or_insert_with(|| File::open(path));
+
+                file.as_ref().ok().map(|file| {
+                    if let Ok(deaths) = Self::compute_deaths_file(&file) {
+                        self.deaths.insert(path.clone(), deaths);
+                    }
+                });
+            }
+        }
+
+        Ok(())
+    }
+
+    fn compute_all_deaths(&mut self) -> anyhow::Result<()> {
+        self.deaths.clear();
+        let directory = fs::read_dir(&self.input)?;
+
+        self.compute_deaths(
+            &directory
+                .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+                .map(path::absolute)
+                .filter_map(Result::ok)
+                .collect(),
+        )
+    }
+
+    fn handle(&mut self, event: &Event) -> anyhow::Result<()> {
+        match event.kind {
+            EventKind::Modify(ModifyKind::Name(RenameMode::Any)) => self.compute_all_deaths()?,
+            EventKind::Remove(_) => self.remove_files(&event.paths),
+            EventKind::Create(_) | EventKind::Modify(_) => self.compute_deaths(&event.paths)?,
+            _ => return Ok(()),
+        }
+
+        self.write_deaths(self.get_total_deaths())
+    }
+
     pub fn watch(&mut self) -> anyhow::Result<()> {
-        self.compute_deaths_dir(fs::read_dir(&self.input)?);
-        self.update_deaths(self.get_total_deaths())?;
+        self.compute_all_deaths()?;
+        self.write_deaths(self.get_total_deaths())?;
 
         let (tx, rx) = channel();
 
-        let input = self.input.clone();
-
         let mut watcher = recommended_watcher(tx)?;
 
-        watcher.watch(&input, RecursiveMode::NonRecursive)?;
+        watcher.watch(&self.input, RecursiveMode::NonRecursive)?;
 
-        let rx_arc = Arc::new(Mutex::new(rx));
-
-        loop {
-            let rx_lock = rx_arc.lock().unwrap();
-            self.receive(&rx_lock);
+        for result in rx {
+            let start = Instant::now();
+            self.handle(&result?)?;
+            let elapsed = start.elapsed();
+            println!("Elapsed: {:?}", elapsed);
         }
+
+        Ok(())
     }
 }
