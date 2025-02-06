@@ -83,12 +83,12 @@ impl DataWatcher {
             if path.extension().map_or(false, |ext| ext == "json") {
                 let reader = self
                     .open_files
-                    .entry(path.clone())
+                    .entry(path.to_owned())
                     .or_insert_with(|| File::open(path).map(BufReader::new));
 
                 if let Ok(reader) = reader.as_mut() {
                     if let Ok(deaths) = Self::compute_deaths_file(reader) {
-                        self.deaths.insert(path.clone(), deaths);
+                        self.deaths.insert(path.to_owned(), deaths);
                     }
                 }
             }
