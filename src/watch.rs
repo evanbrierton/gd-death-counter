@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     fs::{self, File},
-    io::Write,
+    io::{BufReader, Seek, Write},
     path::{self, PathBuf},
     result::Result::Ok,
     sync::mpsc::channel,
@@ -20,7 +20,7 @@ pub struct DataWatcher {
     input: PathBuf,
     output: Option<File>,
     deaths: HashMap<PathBuf, u32>,
-    open_files: HashMap<PathBuf, std::io::Result<File>>,
+    open_files: HashMap<PathBuf, std::io::Result<BufReader<File>>>,
     previous: Option<u32>,
 }
 
@@ -69,24 +69,28 @@ impl DataWatcher {
         self.deaths.values().sum::<u32>() + self.baseline
     }
 
-    fn compute_deaths_file(file: &File) -> anyhow::Result<u32> {
-        let level: Level = serde_json::from_reader(file)?;
+    fn compute_deaths_file(reader: &mut BufReader<File>) -> anyhow::Result<u32> {
+        let start = Instant::now();
+        reader.rewind()?;
+        let level: Level = serde_json::from_reader(reader)?;
+        let elapsed = start.elapsed();
+        println!("File Read: {:?}", elapsed);
         Ok(level.total_deaths())
     }
 
     fn compute_deaths(&mut self, paths: &Vec<PathBuf>) -> anyhow::Result<()> {
         for path in paths {
             if path.extension().map_or(false, |ext| ext == "json") {
-                let file = self
+                let reader = self
                     .open_files
                     .entry(path.clone())
-                    .or_insert_with(|| File::open(path));
+                    .or_insert_with(|| File::open(path).map(BufReader::new));
 
-                file.as_ref().ok().map(|file| {
-                    if let Ok(deaths) = Self::compute_deaths_file(&file) {
+                if let Ok(reader) = reader.as_mut() {
+                    if let Ok(deaths) = Self::compute_deaths_file(reader) {
                         self.deaths.insert(path.clone(), deaths);
                     }
-                });
+                }
             }
         }
 
