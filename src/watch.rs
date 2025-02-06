@@ -5,7 +5,6 @@ use std::{
     path::{self, PathBuf},
     result::Result::Ok,
     sync::mpsc::channel,
-    time::Instant,
 };
 
 use notify::{
@@ -70,11 +69,8 @@ impl DataWatcher {
     }
 
     fn compute_deaths_file(reader: &mut BufReader<File>) -> anyhow::Result<u32> {
-        let start = Instant::now();
         reader.rewind()?;
         let level: Level = serde_json::from_reader(reader)?;
-        let elapsed = start.elapsed();
-        println!("File Read: {:?}", elapsed);
         Ok(level.total_deaths())
     }
 
@@ -132,10 +128,7 @@ impl DataWatcher {
         watcher.watch(&self.input, RecursiveMode::NonRecursive)?;
 
         for result in rx {
-            let start = Instant::now();
             self.handle(&result?)?;
-            let elapsed = start.elapsed();
-            println!("Elapsed: {:?}", elapsed);
         }
 
         Ok(())
